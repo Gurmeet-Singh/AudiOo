@@ -1,30 +1,32 @@
-"""Sources
-____________
-http://stackoverflow.com/questions/19122157/fft-bandpass-filter-in-python
-http://stackoverflow.com/questions/2063284/what-is-the-easiest-way-to-read-wav-files-using-python-summary
-http://www.programcreek.com/python/example/58006/scipy.signal.resample
-http://www.astroml.org/book_figures/chapter10/fig_wiener_filter.html
-http://www.astroml.org/modules/generated/astroML.filters.wiener_filter.html#astroML.filters.wiener_filter
-http://stackoverflow.com/questions/2459295/invertible-stft-and-istft-in-python
-"""
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+# Sources
+# ____________
+# http://stackoverflow.com/questions/19122157/fft-bandpass-filter-in-python
+# http://stackoverflow.com/questions/2063284/what-is-the-easiest-way-to-read-wav-files-using-python-summary
+# http://www.programcreek.com/python/example/58006/scipy.signal.resample
+# http://www.astroml.org/book_figures/chapter10/fig_wiener_filter.html
+# http://www.astroml.org/modules/generated/astroML.filters.wiener_filter.html#astroML.filters.wiener_filter
+# http://stackoverflow.com/questions/2459295/invertible-stft-and-istft-in-python
+
 
 import numpy as np
 import wave
 import scipy, scipy.signal
 import pylab as plt
 
-def stft(x, fs, framesz, hop):
-    framesamp = int(framesz*fs)
-    hopsamp = int(hop*fs)
+def stft(x, framesamp):
+    hopsamp = framesamp/2
     w = scipy.hanning(framesamp)
     X = np.array([scipy.fft(w*x[i:i+framesamp])
                      for i in range(0, len(x)-framesamp, hopsamp)])
     return X
 
-def istft(X, fs, T, hop):
-    x = np.zeros(T*fs)
+def istft(X, size):
+    x = np.zeros(size)
     framesamp = X.shape[1]
-    hopsamp = int(hop*fs)
+    hopsamp = framesamp/2
     for n,i in enumerate(range(0, len(x)-framesamp, hopsamp)):
         x[i:i+framesamp] += scipy.real(scipy.ifft(X[n]))
     return x
@@ -59,6 +61,18 @@ class SoundFile:
         else:
             self.signal = np.array(out)
         return self
+
+    def get_frame(self, winsize, no):
+        shift = winsize/2
+        start = no*shift
+        end = start+winsize
+        return self.signal[start:end]
+
+    def add_signal(self, frame, winsize, no ):
+        shift = winsize/2
+        start = no*shift
+        end = start+winsize
+        self.signal[start:end] = self.signal[start:end] + frame
 
     def write(self, file_name):
         if not self.initialized:
@@ -100,7 +114,7 @@ class SoundFile:
 
         Parameters
         _________
-        type : string, one of "airport", "babble", "car", "exhibition", "restaurant", "street", "subway", "train" 
+        type : string, one of "airport", "babble", "car", "exhibition", "restaurant", "street", "subway", "train"
         snr_dB : float
             Output SNR required in dB.
         """
@@ -116,20 +130,75 @@ class SoundFile:
 
         return self
 
-    def wiener_filter(self):
+    def __filter(self, im, mysize=None, noise=None):
+        """
+        Perform a noise filter on 1-dimensional array `im`.
+        Parameters
+        ----------
+        im : ndarray
+            An 1-dimensional array.
+        mysize : int, optional
+            A scalar giving the size of the Wiener filter window. It should be
+            odd.
+        noise : noise
+        """
+        im = np.asarray(im)
+        if mysize is None:
+            mysize = 3
+
+        substraction_coeff = 5.0
+        w = scipy.hanning(mysize)
+
+        n_spec = scipy.fft(noise.signal[:mysize]*w)
+        n_pow = scipy.absolute(n_spec)**2.0
+
+        hopsamp = mysize/2
+        frames = np.array([scipy.fft(w*self.signal[i:i+mysize])
+                         for i in range(0, self.nsamples - mysize, hopsamp)])
+
+        # plt.figure()
+        # plt.plot([sum(f) for f in frames])
+        # plt.show()
+        # new = np.zeros_like(frames)
+        # for i, f in enumerate(frames):
+            # # Estimate the local mean
+            # lMean = scipy.signal.correlate(f, w, 'same') / mysize
+            #
+            # # Estimate the local variance
+            # lVar = (scipy.signal.correlate(f ** 2, w ** 2, 'same') / mysize
+            #         - lMean ** 2)
+            #
+            # res = lMean + (f - lMean)*(1 - noise / lVar)
+            # new[i] = np.where(lVar < noise, lMean, res)
+
+        n = sum(n_pow)/len(n_pow)
+        y = scipy.absolute(frames)**2
+        new = scipy.sqrt(scipy.maximum(y - substraction_coeff*n, 0.0))
+        new = new/(1 - float(len(y.flatten())*n)/sum(y.flatten()))
+        new = new*scipy.exp(scipy.angle(frames)*1j)
+
+        x = np.zeros(self.nsamples)
+        framesamp = new.shape[1]
+        hopsamp = framesamp/2
+        for n,i in enumerate(range(0, self.nsamples - framesamp, hopsamp)):
+            x[i:i+framesamp] += scipy.real(scipy.ifft(new[n]))
+        return x
+
+    def filter(self):
         if not self.initialized:
             raise SoundFileNotInitialized()
 
         framesz = 0.050  # with a frame size of 50 milliseconds
         framesamp = int(framesz*self.samplerate)
-        self.signal = scipy.signal.wiener(self.signal, framesamp)
+        noise = SoundFile().load_signal(self.signal[:self.nsamples])
+        self.signal = self.__filter(self.signal, framesamp, noise)
         return self
 
     def avg_energy(self):
         if not self.initialized:
             raise SoundFileNotInitialized()
 
-        return float(sum(self.signal * self.signal)/len(self.signal))
+        return float(sum(self.signal ** 2)/len(self.signal))
 
 def test_save_sample():
     # let's prepare signal
@@ -160,13 +229,13 @@ def test_add_noise():
     # Manual check if file is correctly saved
 
 def test_filtering():
-    SoundFile().load_wave("noisy_hello.wav").wiener_filter().write("filtered_hello.wav")
+    SoundFile().load_wave("noisy_hello.wav").filter().write("filtered_hello.wav")
     # Manual check if file is correctly saved
 
 def test_filtering_babble():
     babble = SoundFile().load_wave("hello.wav").add_real_background_noise("babble", 15)
     babble.write("babble_hello.wav")
-    babble.wiener_filter().write("filtered_babble_hello.wav")
+    babble.filter().write("filtered_babble_hello.wav")
     # Manual check if file is correctly saved
 
 def test_stft_istft():
@@ -174,12 +243,11 @@ def test_stft_istft():
     fs = 8000        # sampled at 8 kHz
     T = 5            # lasting 5 seconds
     framesz = 0.050  # with a frame size of 50 milliseconds
-    hop = 0.025      # and hop size of 25 milliseconds.
 
     # Create test signal and STFT.
     t = scipy.linspace(0, T, T*fs, endpoint=False)
     x = scipy.sin(2*scipy.pi*f0*t)
-    X = stft(x, fs, framesz, hop)
+    X = stft(x, int(fs*framesz))
 
     # Plot the magnitude spectrogram.
     plt.figure()
@@ -190,7 +258,7 @@ def test_stft_istft():
     plt.show()
 
     # Compute the ISTFT.
-    xhat = istft(X, fs, T, hop)
+    xhat = istft(X, fs*T)
 
     # Plot the input and output signals over 0.1 seconds.
     T1 = int(0.1*fs)
